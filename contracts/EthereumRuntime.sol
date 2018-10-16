@@ -131,17 +131,16 @@ contract EthereumRuntime is EVMConstants {
         Handlers handlers;
     }
 
-    /**
-     * 
-     */
-    function executeStep(
-        TxInput memory input, 
+    function executeLastStep(
+        bytes memory code,
+        TxInput memory input,
         TxInfo memory info,
         ExecutionContext memory context
-    ) public pure returns (
-        Result memory result,
-        ExecutionContext memory postContext
-    ) {
+    )
+        public
+        pure
+        returns (bytes32 memory postStateRoot)
+    {
         EVMInput memory evmInput;
         evmInput.context = info;
         evmInput.handlers = _newHandlers();
@@ -159,18 +158,25 @@ contract EthereumRuntime is EVMConstants {
         evmInput.stack = EVMStack.fromArray(context.stack);
         evmInput.accounts = _accsFromArray(context.accounts, context.accountsCode);
 
-        EVM memory evm = _call(evmInput, input.staticExec ? CallType.StaticCall : CallType.Call);
-        
-        result.errno = evm.errno;
-        result.returnData = evm.returnData;
+        // set account code
+        // TODO: fake pc
+        EVMAccounts.Account memory target = evmInput.accounts.get(input.target);
+        target.code = code;
 
-        postContext.pc = evm.pc;
-        postContext.gasRemaining = evm.gas;
-        postContext.stack = evm.stack.toArray();
-        postContext.mem = evm.mem.toArray();
-        (postContext.accounts, postContext.accountsCode) = evm.accounts.toArray();
+        EVM memory evm = super._call(evmInput, input.staticExec ? CallType.StaticCall : CallType.Call);
+        postStateRoot = calculateStateRoot(evm);
     }
 
+    function calculateStateRoot(EVM memory evm) internal pure returns (bytes32)  {
+        uint[] memory accounts;
+        bytes memory accountsCode;
+        (accounts, accountsCode) = evm.accounts.toArray();
+
+        uint[] memory stack = evm.stack.toArray();
+        bytes memory mem = evm.mem.toArray();
+
+        return keccak256(abi.encodePacked(accounts, accountsCode, stack, evm));
+    }
 
     function _accsFromArray(uint[] accountsIn, bytes memory accountsCode) internal pure returns (EVMAccounts.Accounts memory accountsOut) {
         if (accountsIn.length == 0) {

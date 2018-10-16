@@ -2,7 +2,7 @@ pragma solidity ^0.4.24;
 pragma experimental ABIEncoderV2;
 
 import { ECDSA } from "./ECDSA.sol";
-import { EthereumRuntime } from "solevm-truffle/EthereumRuntime.sol";
+import { EthereumRuntime } from "./EthereumRuntime.sol";
 
 
 contract ComputationVerifier {
@@ -15,14 +15,14 @@ contract ComputationVerifier {
     event ChallengeStarted(
         address indexed prover,
         uint256 indexed blockNumber,
-        bytes32 txHash,
-        uint64 challengeId
+        bytes32 txHash
     );
 
     enum Status {
         WAIT_FOR_CHALLENGE,
         CHALLENGING,
         WAIT_FOR_JUDGE,
+        JUDGING,
         REVERTED,
         FINALIZED
     }
@@ -32,10 +32,10 @@ contract ComputationVerifier {
         uint256 requestedAt;
         uint256 bond;
         Status status;
+        Challenge challenge;
     }
 
     struct Challenge {
-        uint256 blockNumber;
         address challenger;
         uint256 challengerBond;
         bytes32 txHash;
@@ -44,6 +44,7 @@ contract ComputationVerifier {
         // branch point information
         bytes32 proverStateRoot;
         bytes32 challengerStateRoot;
+        bytes32 correctRoot;
         byte opcode;
     }
 
@@ -83,10 +84,7 @@ contract ComputationVerifier {
     }
 
     function startChallenge(uint256 blockNumber, bytes32 txHash) public payable {
-        bytes32 challengeHash = keccak256(abi.encodePacked(blockNumber, txHash));
-        uint64 challengeId = uint64(bytes8(challengeHash));
-
-        Challenge storage challenge = challenges[challengeId];
+        Challenge storage challenge = requests[blockNumber].challenge;
         challenge.blockNumber = blockNumber;
         challenge.challenger = msg.sender;
         challenge.challengerBond = msg.value;
@@ -101,7 +99,7 @@ contract ComputationVerifier {
      * Report the state branch point calculated from off-chain.
      */
     function reportBranchPoint(
-        uint64 challengeId, uint step,
+        uint256 blockNumber, uint step,
         bytes32 stateRootBefore,
         bytes32 proverStateRootAfter, bytes32 challengerStateRootAfter,
         bytes proverSignature, bytes challengerSignature
@@ -124,6 +122,45 @@ contract ComputationVerifier {
         request.status = Status.WAIT_FOR_JUDGE;
     }
     
-    function judge() public {
+    function judge(
+        uint256 blockNumber,
+        EthereumRuntime.TxInput memory input,
+        EthereumRuntime.TxInfo memory info,
+        EthereumRuntime.ExecutionContext memory context
+    ) public {
+        ChallengeRequest storage request = requests[blockNumber];
+        Challenge storage challenge = request.challenge;
+
+        require(msg.sender == challenge.challenger, "Only challenger can judge.");
+        require(request.status == challenge.WAIT_FOR_JUDGE);
+        // TODO: check that executionContext matches with postStateRoot
+        // TODO: timeout
+
+        challenge.correctRoot = evm.executeLastStep(input, info, context);
+        request.status == Status.JUDGING;
+    }
+
+    function finishJudge(uint256 blockNumber) internal {
+        require(requests[blockNumber].status == Status.JUDGING);
+        ChallengeRequest storage request = requests[blockNumber];
+        Challenge storage challenge = request.challenge;
+
+        if (challenge.correctRoot == challenge.challengerStateRoot) {
+            slashBondOf(request.prover);
+            request.status = Status.REVERTED;
+
+        } else if (challenge.correctRoot == challenge.proverStateRoot) {
+            slashBondOf(challenge.challenger);
+            request.status = Status.FINALIZED;
+            if (request.bond > 0) {
+                msg.sender.transfer(request.bond);
+            }
+
+        } else {
+            revert("Not possible");
+        }
+    }
+
+    function slashBondOf(address someone) internal {
     }
 }
